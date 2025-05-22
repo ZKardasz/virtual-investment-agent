@@ -1,2 +1,4 @@
 yfinance
 pandas
+kafka-python
+matplotlib
