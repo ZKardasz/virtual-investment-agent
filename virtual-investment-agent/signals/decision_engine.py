@@ -49,7 +49,8 @@ def start_signals():
         signal = {
             "stock": symbol,
             "action": action,
-            "timestamp": ts
+            "timestamp": ts,
+            "price": price
         }
 
         producer.send('signals', signal)
