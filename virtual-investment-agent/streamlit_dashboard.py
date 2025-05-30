@@ -1,74 +1,67 @@
+import streamlit as st
 from kafka import KafkaConsumer
 import json
-import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 from datetime import datetime
+import matplotlib.pyplot as plt
 
-# Ustawienia Strumienia
-st.set_page_config(page_title="Dashboard Portfela", layout="wide")
+st.title("Dashboard Portfela Inwestycyjnego")
 
-st.title("📈 Virtual Investment Dashboard")
-st.subheader("📊 Aktualny stan portfela")
+# Ustawienia Kafka
+KAFKA_TOPIC = 'portfolio'
+KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
 
-# Konfiguracja Kafka Consumer
-consumer = KafkaConsumer(
-    'portfolio',
-    bootstrap_servers='localhost:9092',
-    auto_offset_reset='latest',
-    group_id='portfolio_consumer_group',
-    value_deserializer=lambda x: json.loads(x.decode('utf-8'))
-)
+@st.cache_data(ttl=10)
+def consume_portfolio_messages():
+    consumer = KafkaConsumer(
+        KAFKA_TOPIC,
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        auto_offset_reset='latest',
+        enable_auto_commit=True,
+        group_id='portfolio_consumer_group',
+        value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+    )
+    messages = []
+    # Pobierz ostatnie 100 wiadomości (lub mniej)
+    for _ in range(100):
+        msg = next(consumer)
+        messages.append(msg.value)
+    consumer.close()
+    return messages
 
-# Przechowywanie historii
-portfolio_history = []
-transactions = []
+# Pobierz dane
+portfolio_data = consume_portfolio_messages()
 
-# Pobieramy tylko 1 wiadomość żeby odświeżyć widok (streamlit działa w pętli)
-message = next(consumer)
-data = message.value
-portfolio_history.append(data)
+if portfolio_data:
+    # Zamień na DataFrame
+    df = pd.DataFrame(portfolio_data)
+    # Załóżmy, że są kolumny: timestamp, cash, stocks (dictionary z ilościami)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-# Transakcje
-if 'last_action' in data:
-    transactions.append({
-        "timestamp": data["timestamp"],
-        "stock": data["stock"],
-        "action": data["last_action"],
-        "price": data["last_price"]
-    })
+    # Wyświetl aktualny stan portfela (ostatni wpis)
+    latest = df.iloc[-1]
+    st.subheader("Aktualny stan portfela")
+    st.write(f"Gotówka: {latest['cash']} PLN")
+    st.write("Akcje:")
+    for stock, amount in latest['stocks'].items():
+        st.write(f"- {stock}: {amount}")
 
-# Pokaż dane portfela
-st.write(f"💵 Gotówka: **{data['cash']:.2f} USD**")
-st.write(f"📦 Akcje: {data['stocks']}")
+    # Wartość portfela - jeśli jest w danych, albo wylicz (tu przykładowo jako suma gotówki i liczby akcji)
+    # Tu możesz dopasować według danych, które masz w topicu
 
-# Wartość całkowita
-total_value = data['cash'] + sum([
-    quantity * data['stock_prices'][stock]
-    for stock, quantity in data['stocks'].items()
-])
-st.write(f"💰 **Wartość całkowita portfela: {total_value:.2f} USD**")
+    # Wykres wartości portfela w czasie (przykładowo gotówka)
+    st.subheader("Zmiana wartości portfela w czasie")
+    plt.figure(figsize=(10, 5))
+    plt.plot(df['timestamp'], df['cash'], label='Gotówka')
+    plt.xlabel("Czas")
+    plt.ylabel("Wartość (PLN)")
+    plt.legend()
+    st.pyplot(plt)
 
-# Wykres zmian wartości portfela
-df = pd.DataFrame(portfolio_history)
-df['datetime'] = pd.to_datetime(df['timestamp'])
-df['portfolio_value'] = df['cash'] + df['stocks'].apply(
-    lambda s: sum(v * data['stock_prices'][k] for k, v in s.items())
-)
-
-st.subheader("📉 Wartość portfela w czasie")
-fig, ax = plt.subplots()
-ax.plot(df['datetime'], df['portfolio_value'], marker='o')
-ax.set_xlabel("Czas")
-ax.set_ylabel("Wartość [USD]")
-ax.set_title("Zmiana wartości portfela")
-st.pyplot(fig)
-
-# Lista transakcji
-st.subheader("📋 Historia transakcji")
-if transactions:
-    df_tx = pd.DataFrame(transactions)
-    df_tx['timestamp'] = pd.to_datetime(df_tx['timestamp'])
-    st.dataframe(df_tx.sort_values("timestamp", ascending=False))
+    # Historia transakcji (jeśli jest w danych, np. lista dictów z akcjami i akcjami)
+    if 'transactions' in latest:
+        st.subheader("Historia transakcji")
+        transactions_df = pd.DataFrame(latest['transactions'])
+        st.dataframe(transactions_df)
 else:
-    st.info("Brak transakcji.")
+    st.write("Brak danych z topicu portfolio.")
