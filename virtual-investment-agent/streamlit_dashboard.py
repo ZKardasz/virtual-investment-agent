@@ -3,101 +3,208 @@ from kafka import KafkaConsumer
 import json
 import pandas as pd
 import matplotlib.pyplot as plt
+from datetime import datetime
+import time
 
-st.set_page_config(layout="wide")  # szeroki layout
-
-st.title("Dashboard Portfela Inwestycyjnego")
+st.set_page_config(layout="wide")
+st.title("📊 Dashboard Portfela Inwestycyjnego")
 
 # Kafka settings
 KAFKA_TOPIC = 'portfolio'
 KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
 
-@st.cache_data(ttl=10)
 def consume_portfolio_messages():
-    consumer = KafkaConsumer(
-        KAFKA_TOPIC,
-        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        auto_offset_reset='latest',
-        enable_auto_commit=True,
-        group_id='portfolio_consumer_group',
-        value_deserializer=lambda x: json.loads(x.decode('utf-8'))
-    )
-    messages = []
+    """Pobiera najnowsze wiadomości z Kafka"""
     try:
-        for _ in range(100):
-            msg = next(consumer)
-            messages.append(msg.value)
-    except StopIteration:
-        # mniej niż 100 wiadomości dostępnych
-        pass
-    consumer.close()
-    return messages
+        consumer = KafkaConsumer(
+            KAFKA_TOPIC,
+            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+            auto_offset_reset='earliest',  # Zmienione na 'earliest' aby pobrać więcej danych
+            enable_auto_commit=True,
+            group_id='portfolio_dashboard_group',  # Zmieniona nazwa grupy
+            value_deserializer=lambda x: json.loads(x.decode('utf-8')),
+            consumer_timeout_ms=5000  # Timeout po 5 sekundach
+        )
+        
+        messages = []
+        start_time = time.time()
+        
+        # Pobierz wiadomości przez maksymalnie 5 sekund
+        for message in consumer:
+            messages.append(message.value)
+            if time.time() - start_time > 5:  # Max 5 sekund
+                break
+                
+        consumer.close()
+        return messages
+        
+    except Exception as e:
+        st.error(f"Błąd połączenia z Kafka: {e}")
+        return []
+
+def get_latest_prices_from_history(history):
+    """Wyciąga najnowsze ceny dla każdej akcji z historii transakcji"""
+    prices = {}
+    if not history:
+        return prices
+        
+    # Sortuj historię po timestamp
+    sorted_history = sorted(history, key=lambda x: x['timestamp'], reverse=True)
+    
+    # Dla każdej akcji znajdź najnowszą cenę
+    for transaction in sorted_history:
+        stock = transaction['stock']
+        if stock not in prices:
+            prices[stock] = transaction['price']
+    
+    return prices
+
+def calculate_portfolio_value(cash, stocks, history):
+    """Oblicza całkowitą wartość portfela"""
+    prices = get_latest_prices_from_history(history)
+    stocks_value = sum(stocks.get(stock, 0) * prices.get(stock, 0) for stock in stocks.keys())
+    return cash + stocks_value
+
+# Automatyczne odświeżanie co 10 sekund
+if 'last_refresh' not in st.session_state:
+    st.session_state.last_refresh = time.time()
+
+# Przycisk do ręcznego odświeżania
+if st.button("🔄 Odśwież dane"):
+    st.session_state.last_refresh = time.time()
+    st.rerun()
+
+# Auto-refresh co 10 sekund
+if time.time() - st.session_state.last_refresh > 10:
+    st.session_state.last_refresh = time.time()
+    st.rerun()
 
 # Pobierz dane z Kafka
-portfolio_data = consume_portfolio_messages()
+with st.spinner("Pobieranie danych z Kafka..."):
+    portfolio_data = consume_portfolio_messages()
 
 if portfolio_data:
-    # Konwersja na DataFrame
-    df = pd.DataFrame(portfolio_data)
-
-    # Konwersja timestamp na datetime
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.sort_values('timestamp')
-
-    # Funkcja do wyliczenia wartości portfela (gotówka + wartość akcji)
-    def calculate_portfolio_value(row):
-        cash = row['cash']
-        stocks = row['stocks']  # dict np. {'MSFT': 0, 'AAPL': 3, ...}
-        history = row['history'] if 'history' in row else []
-
-        # Ostatnie ceny akcji z historii (dla uproszczenia)
-        prices = {}
-        for stock in stocks.keys():
-            filtered = [t for t in history if t['stock'] == stock]
-            if filtered:
-                prices[stock] = filtered[-1]['price']
-            else:
-                prices[stock] = 0
-
-        stocks_value = sum(stocks[stk] * prices.get(stk, 0) for stk in stocks)
-        return cash + stocks_value
-
-    df['portfolio_value'] = df.apply(calculate_portfolio_value, axis=1)
-
-    # Layout: lewy panel (gotówka, akcje, historia), prawy panel (wykres)
-    left_col, right_col = st.columns([1, 3])
-
+    st.success(f"Pobrano {len(portfolio_data)} wiadomości z topicu 'portfolio'")
+    
+    # Weź najnowsze dane
+    latest_data = portfolio_data[-1]
+    
+    # Layout: lewy panel (stan portfela), prawy panel (wykres i historia)
+    left_col, right_col = st.columns([1, 2])
+    
     with left_col:
-        st.subheader("Aktualny stan portfela")
-        latest = df.iloc[-1]
-        st.write(f"**Gotówka:** {latest['cash']:.2f} PLN")
-
-        st.write("**Akcje:**")
-        for stock, amount in latest['stocks'].items():
-            st.write(f"- {stock}: {amount}")
-
-        # Historia transakcji
-        if 'history' in latest and latest['history']:
-            st.subheader("Historia transakcji")
-            hist_df = pd.DataFrame(latest['history'])
-            hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'])
-            st.dataframe(hist_df[['timestamp', 'action', 'stock', 'price']].sort_values(by='timestamp', ascending=False))
+        st.subheader("💰 Aktualny stan portfela")
+        
+        cash = latest_data['cash']
+        stocks = latest_data['stocks']
+        history = latest_data.get('history', [])
+        
+        # Oblicz wartość portfela
+        portfolio_value = calculate_portfolio_value(cash, stocks, history)
+        
+        st.metric("Gotówka", f"{cash:.2f} PLN")
+        st.metric("Całkowita wartość portfela", f"{portfolio_value:.2f} PLN")
+        
+        st.subheader("📈 Posiadane akcje")
+        if any(amount > 0 for amount in stocks.values()):
+            prices = get_latest_prices_from_history(history)
+            for stock, amount in stocks.items():
+                if amount > 0:
+                    current_price = prices.get(stock, 0)
+                    value = amount * current_price
+                    st.write(f"**{stock}**: {amount} szt. × {current_price:.2f} PLN = {value:.2f} PLN")
         else:
-            st.write("Brak historii transakcji.")
-
+            st.write("Brak posiadanych akcji")
+    
     with right_col:
-        st.subheader("Wykres zmian wartości portfela w czasie")
-
-        plt.figure(figsize=(10,5))
-        plt.plot(df['timestamp'], df['portfolio_value'], marker='o', linestyle='-', color='blue')
-        plt.xlabel("Czas")
-        plt.ylabel("Wartość portfela (PLN)")
-        plt.title("Zmiana wartości portfela w czasie")
-        plt.grid(True)
-        plt.tight_layout()
-
-        st.pyplot(plt.gcf())
-        plt.close()
+        # Historia transakcji
+        if history:
+            st.subheader("📋 Historia transakcji")
+            
+            # Przygotuj DataFrame z historii
+            hist_df = pd.DataFrame(history)
+            hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'])
+            hist_df = hist_df.sort_values('timestamp', ascending=False)
+            
+            # Dodaj kolumnę z wartością transakcji
+            hist_df['value'] = hist_df['price']
+            
+            # Pokaż ostatnie 10 transakcji
+            st.dataframe(
+                hist_df[['timestamp', 'action', 'stock', 'price']].head(10),
+                column_config={
+                    'timestamp': st.column_config.DatetimeColumn('Czas', format='DD/MM/YYYY HH:mm:ss'),
+                    'action': st.column_config.TextColumn('Akcja'),
+                    'stock': st.column_config.TextColumn('Akcja'),
+                    'price': st.column_config.NumberColumn('Cena', format='%.2f PLN')
+                },
+                use_container_width=True
+            )
+            
+            # Wykres zmian wartości portfela w czasie
+            st.subheader("📊 Wykres wartości portfela")
+            
+            # Symuluj zmiany wartości portfela na podstawie transakcji
+            portfolio_timeline = []
+            current_cash = 10000  # Zakładam startową kwotę
+            current_stocks = {stock: 0 for stock in stocks.keys()}
+            
+            for transaction in sorted(history, key=lambda x: x['timestamp']):
+                if transaction['action'] == 'BUY':
+                    current_cash -= transaction['price']
+                    current_stocks[transaction['stock']] += 1
+                elif transaction['action'] == 'SELL':
+                    current_cash += transaction['price']
+                    current_stocks[transaction['stock']] -= 1
+                
+                # Oblicz wartość portfela w tym momencie
+                prices = {transaction['stock']: transaction['price']}
+                stocks_value = sum(current_stocks[stock] * prices.get(stock, transaction['price']) 
+                                 for stock in current_stocks.keys())
+                total_value = current_cash + stocks_value
+                
+                portfolio_timeline.append({
+                    'timestamp': pd.to_datetime(transaction['timestamp']),
+                    'portfolio_value': total_value
+                })
+            
+            if portfolio_timeline:
+                timeline_df = pd.DataFrame(portfolio_timeline)
+                
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.plot(timeline_df['timestamp'], timeline_df['portfolio_value'], 
+                       marker='o', linestyle='-', color='#1f77b4', linewidth=2, markersize=4)
+                ax.set_xlabel("Czas")
+                ax.set_ylabel("Wartość portfela (PLN)")
+                ax.set_title("Zmiana wartości portfela w czasie")
+                ax.grid(True, alpha=0.3)
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+            
+            # Statystyki
+            st.subheader("📊 Statystyki transakcji")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                buy_count = len([t for t in history if t['action'] == 'BUY'])
+                st.metric("Transakcje kupna", buy_count)
+            
+            with col2:
+                sell_count = len([t for t in history if t['action'] == 'SELL'])
+                st.metric("Transakcje sprzedaży", sell_count)
+            
+            with col3:
+                total_transactions = len(history)
+                st.metric("Łączne transakcje", total_transactions)
+        
+        else:
+            st.info("Brak historii transakcji do wyświetlenia")
 
 else:
-    st.write("Brak danych z topicu 'portfolio'.")
+    st.warning("Brak danych z topicu 'portfolio'. Sprawdź czy:")
+    st.write("1. Kafka jest uruchomiona")
+    st.write("2. Topic 'portfolio' istnieje")
+    st.write("3. Moduł portfela wysyła dane")
