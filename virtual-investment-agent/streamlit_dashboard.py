@@ -19,13 +19,14 @@ def consume_portfolio_messages():
         auto_offset_reset='latest',
         enable_auto_commit=True,
         group_id='portfolio_consumer_group',
-        value_deserializer=lambda x: json.loads(x.decode('utf-8'))
+        value_deserializer=lambda x: json.loads(x.decode('utf-8')),
+        consumer_timeout_ms=1000  # po 1 sekundzie kończy czekać na nowe wiadomości
     )
     messages = []
-    # Pobierz ostatnie 100 wiadomości (lub mniej)
-    for _ in range(100):
-        msg = next(consumer)
+    for msg in consumer:
         messages.append(msg.value)
+        if len(messages) >= 100:
+            break
     consumer.close()
     return messages
 
@@ -33,24 +34,18 @@ def consume_portfolio_messages():
 portfolio_data = consume_portfolio_messages()
 
 if portfolio_data:
-    # Zamień na DataFrame
     df = pd.DataFrame(portfolio_data)
-    # Załóżmy, że są kolumny: timestamp, cash, stocks (dictionary z ilościami)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-    # Wyświetl aktualny stan portfela (ostatni wpis)
     latest = df.iloc[-1]
+
     st.subheader("Aktualny stan portfela")
     st.write(f"Gotówka: {latest['cash']} PLN")
     st.write("Akcje:")
     for stock, amount in latest['stocks'].items():
         st.write(f"- {stock}: {amount}")
 
-    # Wartość portfela - jeśli jest w danych, albo wylicz (tu przykładowo jako suma gotówki i liczby akcji)
-    # Tu możesz dopasować według danych, które masz w topicu
-
-    # Wykres wartości portfela w czasie (przykładowo gotówka)
-    st.subheader("Zmiana wartości portfela w czasie")
+    st.subheader("Zmiana wartości gotówki w czasie")
     plt.figure(figsize=(10, 5))
     plt.plot(df['timestamp'], df['cash'], label='Gotówka')
     plt.xlabel("Czas")
@@ -58,10 +53,10 @@ if portfolio_data:
     plt.legend()
     st.pyplot(plt)
 
-    # Historia transakcji (jeśli jest w danych, np. lista dictów z akcjami i akcjami)
-    if 'transactions' in latest:
+    if 'history' in latest and latest['history']:
         st.subheader("Historia transakcji")
-        transactions_df = pd.DataFrame(latest['transactions'])
+        transactions_df = pd.DataFrame(latest['history'])
+        transactions_df['timestamp'] = pd.to_datetime(transactions_df['timestamp'])
         st.dataframe(transactions_df)
 else:
     st.write("Brak danych z topicu portfolio.")
