@@ -2,112 +2,102 @@ import streamlit as st
 from kafka import KafkaConsumer
 import json
 import pandas as pd
-from datetime import datetime
 import matplotlib.pyplot as plt
+
+st.set_page_config(layout="wide")  # szeroki layout
 
 st.title("Dashboard Portfela Inwestycyjnego")
 
+# Kafka settings
 KAFKA_TOPIC = 'portfolio'
 KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
 
 @st.cache_data(ttl=10)
-def consume_portfolio_messages(max_messages=100):
+def consume_portfolio_messages():
     consumer = KafkaConsumer(
         KAFKA_TOPIC,
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         auto_offset_reset='latest',
         enable_auto_commit=True,
-        group_id='portfolio_dashboard_group',
+        group_id='portfolio_consumer_group',
         value_deserializer=lambda x: json.loads(x.decode('utf-8'))
     )
     messages = []
     try:
-        for _ in range(max_messages):
+        for _ in range(100):
             msg = next(consumer)
             messages.append(msg.value)
     except StopIteration:
+        # mniej niż 100 wiadomości dostępnych
         pass
     consumer.close()
     return messages
 
-messages = consume_portfolio_messages()
+# Pobierz dane z Kafka
+portfolio_data = consume_portfolio_messages()
 
-if messages:
-    # Przetwarzamy dane: zamiana timestampów, wartości
-    portfolio_states = []
-    for msg in messages:
-        # Parsuj timestamp jako datetime - zakładam, że timestamp jest wewnątrz historii lub dołożymy bieżący czas
-        # Ponieważ w przesłanym przykładzie portfolio nie ma 'timestamp' w głównym dict,
-        # ale ma go w historii, weźmy timestamp ostatniej transakcji jako przybliżenie.
-        if msg.get('history'):
-            last_ts_str = msg['history'][-1]['timestamp']
-            ts = pd.to_datetime(last_ts_str)
-        else:
-            ts = pd.Timestamp.now()
+if portfolio_data:
+    # Konwersja na DataFrame
+    df = pd.DataFrame(portfolio_data)
 
-        stocks = msg.get('stocks', {})
-        cash = msg.get('cash', 0.0)
-        history = msg.get('history', [])
+    # Konwersja timestamp na datetime
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.sort_values('timestamp')
 
-        # Ostatnie ceny akcji z historii
-        last_prices = {}
-        for entry in reversed(history):
-            stock = entry['stock']
-            if stock not in last_prices:
-                last_prices[stock] = entry['price']
+    # Funkcja do wyliczenia wartości portfela (gotówka + wartość akcji)
+    def calculate_portfolio_value(row):
+        cash = row['cash']
+        stocks = row['stocks']  # dict np. {'MSFT': 0, 'AAPL': 3, ...}
+        history = row['history'] if 'history' in row else []
 
-        stock_value = sum(amount * last_prices.get(stock, 0) for stock, amount in stocks.items())
-        total_value = cash + stock_value
+        # Ostatnie ceny akcji z historii (dla uproszczenia)
+        prices = {}
+        for stock in stocks.keys():
+            filtered = [t for t in history if t['stock'] == stock]
+            if filtered:
+                prices[stock] = filtered[-1]['price']
+            else:
+                prices[stock] = 0
 
-        portfolio_states.append({'timestamp': ts, 'cash': cash, 'stock_value': stock_value, 'total_value': total_value,
-                                 'stocks': stocks, 'history': history, 'raw': msg})
+        stocks_value = sum(stocks[stk] * prices.get(stk, 0) for stk in stocks)
+        return cash + stocks_value
 
-    # Sortujemy po timestamp rosnąco
-    portfolio_states = sorted(portfolio_states, key=lambda x: x['timestamp'])
+    df['portfolio_value'] = df.apply(calculate_portfolio_value, axis=1)
 
-    # Bierzemy ostatni stan jako aktualny
-    latest = portfolio_states[-1]
-
-    left_col, right_col = st.columns([1, 2])
+    # Layout: lewy panel (gotówka, akcje, historia), prawy panel (wykres)
+    left_col, right_col = st.columns([1, 3])
 
     with left_col:
-        st.subheader("Gotówka")
-        st.write(f"{latest['cash']:.2f} PLN")
+        st.subheader("Aktualny stan portfela")
+        latest = df.iloc[-1]
+        st.write(f"**Gotówka:** {latest['cash']:.2f} PLN")
 
-        st.subheader("Akcje w portfelu")
-        stocks = latest['stocks']
-        if stocks:
-            for stock, amount in stocks.items():
-                st.write(f"- {stock}: {amount}")
-        else:
-            st.write("Brak akcji w portfelu.")
+        st.write("**Akcje:**")
+        for stock, amount in latest['stocks'].items():
+            st.write(f"- {stock}: {amount}")
 
-        st.subheader("Historia transakcji")
-        history = latest['history']
-        if history:
-            df_history = pd.DataFrame(history)
-            df_history['timestamp'] = pd.to_datetime(df_history['timestamp'])
-            df_history['timestamp'] = df_history['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-            df_history['price'] = df_history['price'].map('{:.2f} PLN'.format)
-            st.dataframe(df_history[['timestamp', 'action', 'stock', 'price']])
+        # Historia transakcji
+        if 'history' in latest and latest['history']:
+            st.subheader("Historia transakcji")
+            hist_df = pd.DataFrame(latest['history'])
+            hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'])
+            st.dataframe(hist_df[['timestamp', 'action', 'stock', 'price']].sort_values(by='timestamp', ascending=False))
         else:
             st.write("Brak historii transakcji.")
 
     with right_col:
-        st.subheader("Zmiana wartości portfela w czasie")
+        st.subheader("Wykres zmian wartości portfela w czasie")
 
-        df_values = pd.DataFrame(portfolio_states)
-        df_values.set_index('timestamp', inplace=True)
-
-        plt.figure(figsize=(10, 5))
-        plt.plot(df_values.index, df_values['total_value'], label='Łączna wartość portfela')
-        plt.plot(df_values.index, df_values['cash'], label='Gotówka')
-        plt.plot(df_values.index, df_values['stock_value'], label='Wartość akcji')
-        plt.xlabel('Czas')
-        plt.ylabel('Wartość (PLN)')
-        plt.legend()
+        plt.figure(figsize=(10,5))
+        plt.plot(df['timestamp'], df['portfolio_value'], marker='o', linestyle='-', color='blue')
+        plt.xlabel("Czas")
+        plt.ylabel("Wartość portfela (PLN)")
+        plt.title("Zmiana wartości portfela w czasie")
         plt.grid(True)
-        st.pyplot(plt)
+        plt.tight_layout()
+
+        st.pyplot(plt.gcf())
+        plt.close()
 
 else:
     st.write("Brak danych z topicu 'portfolio'.")
