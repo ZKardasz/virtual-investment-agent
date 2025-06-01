@@ -141,44 +141,44 @@ if portfolio_data:
                 use_container_width=True
             )
 
-# Wykres zmian wartości portfela na podstawie snapshotów z Kafka
-st.subheader("📊 Wykres wartości portfela (ostatnie 3 dni)")
+            # Wykres zmian wartości portfela na podstawie snapshotów z Kafka
+            st.subheader("📊 Wykres wartości portfela (ostatnie 3 dni)")
 
-timeline_data = []
+            timeline_data = []
 
-for snapshot in portfolio_data:
-    snapshot_time = pd.to_datetime(snapshot['timestamp']) if 'timestamp' in snapshot else None
-    cash = snapshot.get('cash', 0)
-    stocks = snapshot.get('stocks', {})
-    history = snapshot.get('history', [])
-    total_value = calculate_portfolio_value(cash, stocks, history)
+            for snapshot in portfolio_data:
+                snapshot_time = pd.to_datetime(snapshot['timestamp']) if 'timestamp' in snapshot else None
+                cash = snapshot.get('cash', 0)
+                stocks = snapshot.get('stocks', {})
+                history = snapshot.get('history', [])
+                total_value = calculate_portfolio_value(cash, stocks, history)
 
-    if snapshot_time:
-        timeline_data.append({
-            'timestamp': snapshot_time,
-            'portfolio_value': total_value
-        })
+                if snapshot_time:
+                    timeline_data.append({
+                        'timestamp': snapshot_time,
+                        'portfolio_value': total_value
+                    })
 
-# Filtruj dane z ostatnich 3 dni
-three_days_ago = datetime.utcnow() - timedelta(days=3)
-filtered_data = [entry for entry in timeline_data if entry['timestamp'] >= three_days_ago]
+            # Filtruj dane z ostatnich 3 dni
+            three_days_ago = datetime.utcnow() - timedelta(days=3)
+            filtered_data = [entry for entry in timeline_data if entry['timestamp'] >= three_days_ago]
 
-if filtered_data:
-    df_timeline = pd.DataFrame(filtered_data).sort_values('timestamp')
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(df_timeline['timestamp'], df_timeline['portfolio_value'], 
-            marker='o', linestyle='-', color='#1f77b4', linewidth=2, markersize=4)
-    ax.set_xlabel("Czas")
-    ax.set_ylabel("Wartość portfela (PLN)")
-    ax.set_title("Zmiana wartości portfela w czasie (ostatnie 3 dni)")
-    ax.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    st.pyplot(fig)
-    plt.close()
-else:
-    st.info("Brak danych z ostatnich 3 dni do wygenerowania wykresu.")
+            if filtered_data:
+                df_timeline = pd.DataFrame(filtered_data).sort_values('timestamp')
+            
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.plot(df_timeline['timestamp'], df_timeline['portfolio_value'], 
+                        marker='o', linestyle='-', color='#1f77b4', linewidth=2, markersize=4)
+                ax.set_xlabel("Czas")
+                ax.set_ylabel("Wartość portfela (PLN)")
+                ax.set_title("Zmiana wartości portfela w czasie (ostatnie 3 dni)")
+                ax.grid(True, alpha=0.3)
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
+            else:
+                st.info("Brak danych z ostatnich 3 dni do wygenerowania wykresu.")
 
           
             # Statystyki
