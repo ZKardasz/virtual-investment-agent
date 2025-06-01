@@ -5,7 +5,7 @@ from config import settings
 from utils.kafka_utils import create_kafka_producer, send_to_kafka
 
 def fetch_price(ticker):
-    data = yf.download(tickers=ticker, period="1d", interval="1m")
+    data = yf.download(tickers=ticker, period="7d", interval="1m")
     if not data.empty:
         return float(data['Close'].iloc[-1].item())
     return None
