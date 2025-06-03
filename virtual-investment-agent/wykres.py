@@ -2,78 +2,52 @@ import streamlit as st
 from kafka import KafkaConsumer
 import json
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.express as px
 from datetime import datetime, timedelta
-import matplotlib.dates as mdates
 
-st.title("📊 Wykres wartości portfela (ostatnie 2 dni)")
-
-# Ustawienia Kafka
+# Konfiguracja Kafka
 KAFKA_TOPIC = 'portfolio'
-KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
+KAFKA_BOOTSTRAP_SERVERS = 'localhost:9092'
 
-# Pomocnicza funkcja do parsowania dat
-def parse_timestamp(ts):
-    try:
-        return pd.to_datetime(ts)
-    except:
-        return None
+# Ustawienie Streamlit
+st.set_page_config(layout="wide")
+st.title("📈 Portfolio Dashboard")
 
-# Funkcja do pobierania danych z Kafka
-def get_data_from_kafka():
+@st.cache_data(ttl=60)  # buforuj dane na 60s
+def load_data():
     consumer = KafkaConsumer(
         KAFKA_TOPIC,
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         auto_offset_reset='earliest',
         enable_auto_commit=False,
+        group_id='streamlit-dashboard',  # unikalna grupa konsumentów
         value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-        consumer_timeout_ms=10000
+        consumer_timeout_ms=60000  # czekaj maksymalnie 60s
     )
 
     data = []
-    yesterday = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-    tomorrow = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    now = datetime.utcnow()
+    two_days_ago = now - timedelta(days=2)
 
     for message in consumer:
-        value = message.value
-        ts = parse_timestamp(value.get("timestamp", ""))
-        if ts and yesterday <= ts < tomorrow:
-            cash = value.get("cash", 0)
-            stocks = value.get("stocks", {})
-            history = value.get("history", [])
-            latest_prices = {h['stock']: h['price'] for h in history if 'stock' in h and 'price' in h}
-            stocks_value = sum(stocks.get(s, 0) * latest_prices.get(s, 0) for s in stocks)
-            total_value = cash + stocks_value
+        msg = message.value
 
-            data.append({
-                "timestamp": ts,
-                "portfolio_value": total_value
-            })
+        if isinstance(msg, dict) and 'timestamp' in msg and 'portfolio_value' in msg:
+            try:
+                msg_time = datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00'))
+                if msg_time >= two_days_ago:
+                    data.append({'timestamp': msg_time, 'portfolio_value': msg['portfolio_value']})
+            except Exception as e:
+                print("Błąd przy przetwarzaniu wiadomości:", e)
 
     consumer.close()
     return pd.DataFrame(data)
 
-# Pobierz dane
-df = get_data_from_kafka()
+df = load_data()
 
-# Sprawdź i narysuj wykres
-if not df.empty:
-    df = df.sort_values("timestamp")
-
-    fig, ax = plt.subplots(figsize=(14, 6))
-    ax.plot(df['timestamp'], df['portfolio_value'], marker='o', linestyle='-', markersize=3, label='Wartość portfela')
-
-    ax.set_xlabel("Czas")
-    ax.set_ylabel("Wartość portfela (PLN)")
-    ax.set_title("Zmiana wartości portfela (co 30s)")
-
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m %H:%M'))
-    ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))  # co 2h
-    ax.xaxis.set_minor_locator(mdates.MinuteLocator(interval=30))  # co 30 min
-    ax.tick_params(axis='x', labelrotation=45)
-
-    ax.grid(True)
-    ax.legend()
-    st.pyplot(fig)
+if df.empty:
+    st.warning("Brak danych z ostatnich 2 dni w temacie Kafka.")
 else:
-    st.warning("Brak danych z ostatnich 2 dni do wygenerowania wykresu.")
+    df.sort_values('timestamp', inplace=True)
+    fig = px.line(df, x='timestamp', y='portfolio_value', title='Portfolio Value Over Time')
+    st.plotly_chart(fig, use_container_width=True)
