@@ -66,6 +66,25 @@ def parse_timestamp(timestamp_str):
     except:
         return pd.Timestamp.now()
 
+def determine_time_period(timestamps):
+    """Określa najlepszy okres czasowy do wyświetlenia na podstawie dostępnych danych"""
+    if not timestamps:
+        return timedelta(hours=1), "1 godzina"
+    
+    timestamps = sorted(timestamps)
+    time_span = timestamps[-1] - timestamps[0]
+    
+    if time_span >= timedelta(days=3):
+        return timedelta(days=3), "3 dni"
+    elif time_span >= timedelta(days=1):
+        return timedelta(days=1), "1 dzień"
+    elif time_span >= timedelta(hours=6):
+        return timedelta(hours=6), "6 godzin"
+    elif time_span >= timedelta(hours=1):
+        return timedelta(hours=1), "1 godzina"
+    else:
+        return timedelta(minutes=30), "30 minut"
+
 # --- Prosty timer do odświeżania ---
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = time.time()
@@ -130,11 +149,9 @@ if portfolio_data:
                 use_container_width=True
             )
         
-        st.subheader("📊 Wykres wartości portfela (ostatnie 3 dni)")
-
+        # Przygotowanie danych do wykresu
         timeline_data = []
         current_time = datetime.now()
-        three_days_ago = current_time - timedelta(days=3)
 
         for i, snapshot in enumerate(portfolio_data):
             if 'timestamp' in snapshot:
@@ -156,7 +173,24 @@ if portfolio_data:
 
         if timeline_data:
             timeline_data.sort(key=lambda x: x['timestamp'])
-            filtered_data = [entry for entry in timeline_data if entry['timestamp'] >= three_days_ago]
+            
+            # Określ optymalny okres czasowy na podstawie dostępnych danych
+            timestamps = [entry['timestamp'] for entry in timeline_data]
+            time_period, period_name = determine_time_period(timestamps)
+            
+            # Filtruj dane tylko jeśli okres jest dłuższy niż dostępne dane
+            current_time = datetime.now()
+            cutoff_time = current_time - time_period
+            
+            # Jeśli najstarsze dane są nowsze niż cutoff, pokaż wszystkie dane
+            if timestamps and timestamps[0] > cutoff_time:
+                filtered_data = timeline_data
+                actual_period = "wszystkie dostępne dane"
+            else:
+                filtered_data = [entry for entry in timeline_data if entry['timestamp'] >= cutoff_time]
+                actual_period = period_name
+            
+            st.subheader(f"📊 Wykres wartości portfela ({actual_period})")
             
             if filtered_data:
                 df_timeline = pd.DataFrame(filtered_data)
@@ -173,7 +207,7 @@ if portfolio_data:
                         markersize=4, alpha=0.7, label='Wartość akcji')
                 ax.set_xlabel("Czas")
                 ax.set_ylabel("Wartość (PLN)")
-                ax.set_title("Zmiana wartości portfela w czasie (ostatnie 3 dni)")
+                ax.set_title(f"Zmiana wartości portfela w czasie ({actual_period})")
                 ax.grid(True, alpha=0.3)
                 ax.legend()
                 plt.xticks(rotation=45)
@@ -193,8 +227,19 @@ if portfolio_data:
                         st.metric("Zmiana wartości", f"{change:+.2f} PLN", f"{change_pct:+.2f}%")
                         st.metric("Maksymalna wartość", f"{df_timeline['portfolio_value'].max():.2f} PLN")
                         st.metric("Minimalna wartość", f"{df_timeline['portfolio_value'].min():.2f} PLN")
+                        
+                        # Dodatkowe info o okresie
+                        time_span = timestamps[-1] - timestamps[0]
+                        if time_span.total_seconds() < 3600:  # mniej niż godzina
+                            span_text = f"{int(time_span.total_seconds() / 60)} minut"
+                        elif time_span.total_seconds() < 86400:  # mniej niż dzień
+                            span_text = f"{time_span.total_seconds() / 3600:.1f} godzin"
+                        else:
+                            span_text = f"{time_span.days} dni"
+                        
+                        st.info(f"Okres danych: {span_text}")
             else:
-                st.info("Brak danych z ostatnich 3 dni do wygenerowania wykresu.")
+                st.info("Brak danych do wygenerowania wykresu w wybranym okresie.")
         else:
             st.info("Brak danych do wygenerowania wykresu.")
 
