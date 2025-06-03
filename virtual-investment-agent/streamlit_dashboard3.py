@@ -14,7 +14,7 @@ KAFKA_TOPIC = 'portfolio'
 KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
 
 def consume_portfolio_messages():
-    """Pobiera wiadomości z Kafka od wczoraj"""
+    """Pobiera wiadomości z Kafka z ostatnich 2 dni (wczoraj i dzisiaj)"""
     try:
         # Używamy unikalnej group_id za każdym razem, aby czytać od początku
         group_id = f'portfolio_dashboard_group_{int(time.time())}'
@@ -36,10 +36,11 @@ def consume_portfolio_messages():
         empty_polls = 0
         max_empty_polls = 3
         
-        # Oblicz timestamp od wczoraj
-        yesterday = datetime.now() - timedelta(days=1)
+        # Oblicz zakres dat - 2 czerwca i 3 czerwca 2025
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday = today - timedelta(days=1)
         
-        st.info("🔍 Pobieranie danych z Kafka od wczoraj...")
+        st.info(f"🔍 Pobieranie danych z Kafka od {yesterday.strftime('%d.%m.%Y')} do {today.strftime('%d.%m.%Y')}...")
         
         while True:
             # Poll z większym timeout
@@ -64,7 +65,7 @@ def consume_portfolio_messages():
                 
         consumer.close()
         
-        # Filtruj wiadomości od wczoraj i usuń duplikaty
+        # Filtruj wiadomości z ostatnich 2 dni (wczoraj i dzisiaj) i usuń duplikaty
         filtered_messages = []
         seen_timestamps = set()
         
@@ -73,7 +74,7 @@ def consume_portfolio_messages():
             if timestamp_str:
                 try:
                     msg_timestamp = parse_timestamp(timestamp_str)
-                    # Sprawdź czy wiadomość jest od wczoraj
+                    # Sprawdź czy wiadomość jest z wczoraj lub dzisiaj
                     if msg_timestamp >= yesterday and timestamp_str not in seen_timestamps:
                         seen_timestamps.add(timestamp_str)
                         filtered_messages.append(msg)
@@ -83,7 +84,7 @@ def consume_portfolio_messages():
                 # Jeśli brak timestamp, dodaj wiadomość (może być najnowsza)
                 filtered_messages.append(msg)
         
-        st.success(f"✅ Pobrano {len(filtered_messages)} wiadomości od wczoraj (z {len(messages)} całkowitych)")
+        st.success(f"✅ Pobrano {len(filtered_messages)} wiadomości z okresu {yesterday.strftime('%d.%m')} - {today.strftime('%d.%m')} (z {len(messages)} całkowitych)")
         return filtered_messages
         
     except Exception as e:
@@ -158,11 +159,11 @@ if st.button("🔄 Odśwież dane"):
     st.experimental_set_query_params(refresh=int(time.time()))
 
 # Pobierz dane z Kafka
-with st.spinner("Pobieranie danych z Kafka od wczoraj..."):
+with st.spinner("Pobieranie danych z Kafka z ostatnich 2 dni (02.06 - 03.06)..."):
     portfolio_data = consume_portfolio_messages()
 
 if portfolio_data:
-    st.success(f"✅ Załadowano {len(portfolio_data)} snapshotów portfela od wczoraj")
+    st.success(f"✅ Załadowano {len(portfolio_data)} snapshotów portfela z ostatnich 2 dni")
     
     # Debug info - pokaż zakres czasowy danych
     if len(portfolio_data) > 1:
@@ -181,7 +182,7 @@ if portfolio_data:
             else:
                 span_text = f"{time_span.days} dni, {int((time_span.total_seconds() % 86400) / 3600)} godzin"
             
-            st.info(f"📅 Dane obejmują okres: {span_text} (od {timestamps[0].strftime('%Y-%m-%d %H:%M:%S')} do {timestamps[-1].strftime('%Y-%m-%d %H:%M:%S')})")
+            st.info(f"📅 Dane obejmują okres: {span_text} (od {timestamps[0].strftime('%d.%m.%Y %H:%M')} do {timestamps[-1].strftime('%d.%m.%Y %H:%M')})")
     
     latest_data = portfolio_data[-1]
     
@@ -252,10 +253,13 @@ if portfolio_data:
         if timeline_data:
             timeline_data.sort(key=lambda x: x['timestamp'])
             
-            st.subheader("📊 Wykres wartości portfela (od wczoraj)")
+            st.subheader("📊 Wykres wartości portfela (02.06 - 03.06)")
             
             if timeline_data:
                 df_timeline = pd.DataFrame(timeline_data)
+                
+                # Sortuj według czasu
+                df_timeline = df_timeline.sort_values('timestamp')
                 
                 # Prostszy wykres - tylko wartość portfela
                 fig, ax = plt.subplots(figsize=(12, 6))
@@ -265,11 +269,14 @@ if portfolio_data:
                 
                 ax.set_xlabel("Czas")
                 ax.set_ylabel("Wartość portfela (PLN)")
-                ax.set_title("Zmiana wartości portfela (od wczoraj)")
+                ax.set_title("Zmiana wartości portfela w czasie (02.06 - 03.06.2025)")
                 ax.grid(True, alpha=0.3)
                 ax.legend()
                 
-                # Lepsze formatowanie osi X
+                # Lepsze formatowanie osi X - pokaż daty i godziny
+                import matplotlib.dates as mdates
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m %H:%M'))
+                ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))  # Co 2 godziny
                 plt.xticks(rotation=45)
                 ax.tick_params(axis='x', labelsize=9)
                 plt.tight_layout()
@@ -289,10 +296,13 @@ if portfolio_data:
                         st.metric("Maksymalna wartość", f"{df_timeline['portfolio_value'].max():.2f} PLN")
                         st.metric("Minimalna wartość", f"{df_timeline['portfolio_value'].min():.2f} PLN")
                         
-                        # Info o liczbie punktów danych
-                        st.info(f"📊 Punktów danych: {len(df_timeline)}")
+                        # Info o liczbie punktów danych i zakresie dat
+                        first_date = df_timeline['timestamp'].iloc[0].strftime('%d.%m %H:%M')
+                        last_date = df_timeline['timestamp'].iloc[-1].strftime('%d.%m %H:%M')
+                        st.info(f"📊 {len(df_timeline)} punktów danych")
+                        st.info(f"🕐 Od {first_date} do {last_date}")
             else:
-                st.info("Brak danych od wczoraj do wygenerowania wykresu.")
+                st.info("Brak danych z okresu 02.06 - 03.06 do wygenerowania wykresu.")
         else:
             st.info("Brak danych do wygenerowania wykresu.")
 
