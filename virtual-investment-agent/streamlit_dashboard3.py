@@ -14,7 +14,7 @@ KAFKA_TOPIC = 'portfolio'
 KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
 
 def consume_portfolio_messages():
-    """Pobiera wszystkie dostępne wiadomości z Kafka"""
+    """Pobiera wiadomości z Kafka od wczoraj"""
     try:
         # Używamy unikalnej group_id za każdym razem, aby czytać od początku
         group_id = f'portfolio_dashboard_group_{int(time.time())}'
@@ -36,7 +36,10 @@ def consume_portfolio_messages():
         empty_polls = 0
         max_empty_polls = 3
         
-        st.info("🔍 Pobieranie wszystkich danych z Kafka topiku...")
+        # Oblicz timestamp od wczoraj
+        yesterday = datetime.now() - timedelta(days=1)
+        
+        st.info("🔍 Pobieranie danych z Kafka od wczoraj...")
         
         while True:
             # Poll z większym timeout
@@ -61,20 +64,27 @@ def consume_portfolio_messages():
                 
         consumer.close()
         
-        # Usuń duplikaty na podstawie timestamp
-        unique_messages = []
+        # Filtruj wiadomości od wczoraj i usuń duplikaty
+        filtered_messages = []
         seen_timestamps = set()
         
         for msg in messages:
-            timestamp = msg.get('timestamp')
-            if timestamp and timestamp not in seen_timestamps:
-                seen_timestamps.add(timestamp)
-                unique_messages.append(msg)
-            elif not timestamp:
-                unique_messages.append(msg)
+            timestamp_str = msg.get('timestamp')
+            if timestamp_str:
+                try:
+                    msg_timestamp = parse_timestamp(timestamp_str)
+                    # Sprawdź czy wiadomość jest od wczoraj
+                    if msg_timestamp >= yesterday and timestamp_str not in seen_timestamps:
+                        seen_timestamps.add(timestamp_str)
+                        filtered_messages.append(msg)
+                except:
+                    continue
+            else:
+                # Jeśli brak timestamp, dodaj wiadomość (może być najnowsza)
+                filtered_messages.append(msg)
         
-        st.success(f"✅ Pobrano {len(unique_messages)} unikalnych wiadomości (z {len(messages)} całkowitych)")
-        return unique_messages
+        st.success(f"✅ Pobrano {len(filtered_messages)} wiadomości od wczoraj (z {len(messages)} całkowitych)")
+        return filtered_messages
         
     except Exception as e:
         st.error(f"❌ Błąd połączenia z Kafka: {e}")
@@ -148,11 +158,11 @@ if st.button("🔄 Odśwież dane"):
     st.experimental_set_query_params(refresh=int(time.time()))
 
 # Pobierz dane z Kafka
-with st.spinner("Pobieranie wszystkich danych z Kafka..."):
+with st.spinner("Pobieranie danych z Kafka od wczoraj..."):
     portfolio_data = consume_portfolio_messages()
 
 if portfolio_data:
-    st.success(f"✅ Załadowano {len(portfolio_data)} snapshotów portfela")
+    st.success(f"✅ Załadowano {len(portfolio_data)} snapshotów portfela od wczoraj")
     
     # Debug info - pokaż zakres czasowy danych
     if len(portfolio_data) > 1:
@@ -242,43 +252,26 @@ if portfolio_data:
         if timeline_data:
             timeline_data.sort(key=lambda x: x['timestamp'])
             
-            # Określ optymalny okres czasowy na podstawie dostępnych danych
-            timestamps = [entry['timestamp'] for entry in timeline_data]
-            time_period, period_name = determine_time_period(timestamps)
+            st.subheader("📊 Wykres wartości portfela (od wczoraj)")
             
-            # Filtruj dane tylko jeśli okres jest dłuższy niż dostępne dane
-            current_time = datetime.now()
-            cutoff_time = current_time - time_period
-            
-            # Jeśli najstarsze dane są nowsze niż cutoff, pokaż wszystkie dane
-            if timestamps and timestamps[0] > cutoff_time:
-                filtered_data = timeline_data
-                actual_period = "wszystkie dostępne dane"
-            else:
-                filtered_data = [entry for entry in timeline_data if entry['timestamp'] >= cutoff_time]
-                actual_period = period_name
-            
-            st.subheader(f"📊 Wykres wartości portfela ({actual_period})")
-            
-            if filtered_data:
-                df_timeline = pd.DataFrame(filtered_data)
+            if timeline_data:
+                df_timeline = pd.DataFrame(timeline_data)
                 
+                # Prostszy wykres - tylko wartość portfela
                 fig, ax = plt.subplots(figsize=(12, 6))
                 ax.plot(df_timeline['timestamp'], df_timeline['portfolio_value'], 
-                        marker='o', linestyle='-', color='#1f77b4', linewidth=2, 
-                        markersize=6, label='Wartość portfela')
-                ax.plot(df_timeline['timestamp'], df_timeline['cash'],
-                        marker='s', linestyle='--', color='#2ca02c', linewidth=1,
-                        markersize=4, alpha=0.7, label='Gotówka')
-                ax.plot(df_timeline['timestamp'], df_timeline['stocks_value'],
-                        marker='^', linestyle='--', color='#ff7f0e', linewidth=1,
-                        markersize=4, alpha=0.7, label='Wartość akcji')
+                        marker='o', linestyle='-', color='#1f77b4', linewidth=3, 
+                        markersize=4, label='Wartość portfela')
+                
                 ax.set_xlabel("Czas")
-                ax.set_ylabel("Wartość (PLN)")
-                ax.set_title(f"Zmiana wartości portfela w czasie ({actual_period})")
+                ax.set_ylabel("Wartość portfela (PLN)")
+                ax.set_title("Zmiana wartości portfela (od wczoraj)")
                 ax.grid(True, alpha=0.3)
                 ax.legend()
+                
+                # Lepsze formatowanie osi X
                 plt.xticks(rotation=45)
+                ax.tick_params(axis='x', labelsize=9)
                 plt.tight_layout()
                 
                 col1, col2 = st.columns([3, 1])
@@ -296,18 +289,10 @@ if portfolio_data:
                         st.metric("Maksymalna wartość", f"{df_timeline['portfolio_value'].max():.2f} PLN")
                         st.metric("Minimalna wartość", f"{df_timeline['portfolio_value'].min():.2f} PLN")
                         
-                        # Dodatkowe info o okresie
-                        time_span = timestamps[-1] - timestamps[0]
-                        if time_span.total_seconds() < 3600:  # mniej niż godzina
-                            span_text = f"{int(time_span.total_seconds() / 60)} minut"
-                        elif time_span.total_seconds() < 86400:  # mniej niż dzień
-                            span_text = f"{time_span.total_seconds() / 3600:.1f} godzin"
-                        else:
-                            span_text = f"{time_span.days} dni"
-                        
-                        st.info(f"Okres danych: {span_text}")
+                        # Info o liczbie punktów danych
+                        st.info(f"📊 Punktów danych: {len(df_timeline)}")
             else:
-                st.info("Brak danych do wygenerowania wykresu w wybranym okresie.")
+                st.info("Brak danych od wczoraj do wygenerowania wykresu.")
         else:
             st.info("Brak danych do wygenerowania wykresu.")
 
