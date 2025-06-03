@@ -13,18 +13,8 @@ st.title("📊 Dashboard Portfela Inwestycyjnego")
 KAFKA_TOPIC = 'portfolio'
 KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
 
-def parse_timestamp(timestamp_str):
-    """Parsuje różne formaty timestamp'ów"""
-    try:
-        if isinstance(timestamp_str, str):
-            return pd.to_datetime(timestamp_str)
-        else:
-            return pd.to_datetime(timestamp_str)
-    except:
-        return pd.Timestamp.now()
-
 def consume_portfolio_messages():
-    """Pobiera najnowsze wiadomości z Kafka (do 3 dni wstecz)"""
+    """Pobiera najnowsze wiadomości z Kafka"""
     try:
         consumer = KafkaConsumer(
             KAFKA_TOPIC,
@@ -33,23 +23,17 @@ def consume_portfolio_messages():
             enable_auto_commit=True,
             group_id='portfolio_dashboard_group',
             value_deserializer=lambda x: json.loads(x.decode('utf-8')),
-            consumer_timeout_ms=600000  # 60 sekund
+            consumer_timeout_ms=5000
         )
         
         messages = []
-        current_time = datetime.now()
-        three_days_ago = current_time - timedelta(days=3)
+        start_time = time.time()
         
         for message in consumer:
-            data = message.value
-            timestamp = data.get('timestamp')
-            if timestamp:
-                msg_time = parse_timestamp(timestamp)
-                # Jeśli starsze niż 3 dni, pomijaj
-                if msg_time < three_days_ago:
-                    continue
-            messages.append(data)
-        
+            messages.append(message.value)
+            if time.time() - start_time > 5:
+                break
+                
         consumer.close()
         return messages
         
@@ -61,12 +45,14 @@ def get_latest_prices_from_history(history):
     prices = {}
     if not history:
         return prices
-    
+        
     sorted_history = sorted(history, key=lambda x: x['timestamp'], reverse=True)
+    
     for transaction in sorted_history:
         stock = transaction['stock']
         if stock not in prices:
             prices[stock] = transaction['price']
+    
     return prices
 
 def calculate_portfolio_value(cash, stocks, history):
@@ -74,18 +60,26 @@ def calculate_portfolio_value(cash, stocks, history):
     stocks_value = sum(stocks.get(stock, 0) * prices.get(stock, 0) for stock in stocks.keys())
     return cash + stocks_value
 
-# Auto-refresh co 10 sekund
+def parse_timestamp(timestamp_str):
+    try:
+        return pd.to_datetime(timestamp_str)
+    except:
+        return pd.Timestamp.now()
+
+# --- Prosty timer do odświeżania ---
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = time.time()
 
-if st.button("🔄 Odśwież dane"):
-    st.session_state.last_refresh = time.time()
-    st.experimental_rerun()
-
 if time.time() - st.session_state.last_refresh > 10:
     st.session_state.last_refresh = time.time()
-    st.experimental_rerun()
+    # Przekierowanie na siebie (odświeżenie strony)
+    st.experimental_set_query_params(refresh=int(time.time()))
 
+# Przycisk ręcznego odświeżania (opcjonalnie)
+if st.button("🔄 Odśwież dane"):
+    st.experimental_set_query_params(refresh=int(time.time()))
+
+# Pobierz dane z Kafka
 with st.spinner("Pobieranie danych z Kafka..."):
     portfolio_data = consume_portfolio_messages()
 
@@ -137,7 +131,7 @@ if portfolio_data:
             )
         
         st.subheader("📊 Wykres wartości portfela (ostatnie 3 dni)")
-        
+
         timeline_data = []
         current_time = datetime.now()
         three_days_ago = current_time - timedelta(days=3)
@@ -148,75 +142,61 @@ if portfolio_data:
             else:
                 snapshot_time = current_time - timedelta(minutes=len(portfolio_data) - i)
             
-            # Filtrujemy tu również, żeby mieć pewność
-            if snapshot_time < three_days_ago:
-                continue
-            
-            cash_snap = snapshot.get('cash', 0)
-            stocks_snap = snapshot.get('stocks', {})
-            history_snap = snapshot.get('history', [])
-            total_value = calculate_portfolio_value(cash_snap, stocks_snap, history_snap)
-            
+            cash = snapshot.get('cash', 0)
+            stocks = snapshot.get('stocks', {})
+            history = snapshot.get('history', [])
+            total_value = calculate_portfolio_value(cash, stocks, history)
+
             timeline_data.append({
                 'timestamp': snapshot_time,
                 'portfolio_value': total_value,
-                'cash': cash_snap,
-                'stocks_value': total_value - cash_snap
+                'cash': cash,
+                'stocks_value': total_value - cash
             })
-        
+
         if timeline_data:
             timeline_data.sort(key=lambda x: x['timestamp'])
-            df_timeline = pd.DataFrame(timeline_data)
+            filtered_data = [entry for entry in timeline_data if entry['timestamp'] >= three_days_ago]
             
-            fig, ax = plt.subplots(figsize=(12, 6))
-            
-            ax.plot(df_timeline['timestamp'], df_timeline['portfolio_value'], 
-                    marker='o', linestyle='-', color='#1f77b4', linewidth=2, 
-                    markersize=6, label='Wartość portfela')
-            ax.plot(df_timeline['timestamp'], df_timeline['cash'],
-                    marker='s', linestyle='--', color='#2ca02c', linewidth=1,
-                    markersize=4, alpha=0.7, label='Gotówka')
-            ax.plot(df_timeline['timestamp'], df_timeline['stocks_value'],
-                    marker='^', linestyle='--', color='#ff7f0e', linewidth=1,
-                    markersize=4, alpha=0.7, label='Wartość akcji')
-            
-            ax.set_xlabel("Czas")
-            ax.set_ylabel("Wartość (PLN)")
-            ax.set_title("Zmiana wartości portfela w czasie (ostatnie 3 dni)")
-            ax.grid(True, alpha=0.3)
-            ax.legend()
-            
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-            
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.pyplot(fig)
-            
-            with col2:
-                st.subheader("📈 Statystyki")
-                if len(df_timeline) > 1:
-                    start_value = df_timeline['portfolio_value'].iloc[0]
-                    end_value = df_timeline['portfolio_value'].iloc[-1]
-                    change = end_value - start_value
-                    change_pct = (change / start_value * 100) if start_value != 0 else 0
-                    
-                    st.metric("Zmiana wartości", 
-                              f"{change:+.2f} PLN", 
-                              f"{change_pct:+.2f}%")
-                    
-                    max_value = df_timeline['portfolio_value'].max()
-                    min_value = df_timeline['portfolio_value'].min()
-                    
-                    st.metric("Maksymalna wartość", f"{max_value:.2f} PLN")
-                    st.metric("Minimalna wartość", f"{min_value:.2f} PLN")
-            
-            plt.close()
+            if filtered_data:
+                df_timeline = pd.DataFrame(filtered_data)
+                
+                fig, ax = plt.subplots(figsize=(12, 6))
+                ax.plot(df_timeline['timestamp'], df_timeline['portfolio_value'], 
+                        marker='o', linestyle='-', color='#1f77b4', linewidth=2, 
+                        markersize=6, label='Wartość portfela')
+                ax.plot(df_timeline['timestamp'], df_timeline['cash'],
+                        marker='s', linestyle='--', color='#2ca02c', linewidth=1,
+                        markersize=4, alpha=0.7, label='Gotówka')
+                ax.plot(df_timeline['timestamp'], df_timeline['stocks_value'],
+                        marker='^', linestyle='--', color='#ff7f0e', linewidth=1,
+                        markersize=4, alpha=0.7, label='Wartość akcji')
+                ax.set_xlabel("Czas")
+                ax.set_ylabel("Wartość (PLN)")
+                ax.set_title("Zmiana wartości portfela w czasie (ostatnie 3 dni)")
+                ax.grid(True, alpha=0.3)
+                ax.legend()
+                plt.xticks(rotation=45)
+                plt.tight_layout()
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.pyplot(fig)
+                with col2:
+                    st.subheader("📈 Statystyki")
+                    if len(df_timeline) > 1:
+                        start_value = df_timeline['portfolio_value'].iloc[0]
+                        end_value = df_timeline['portfolio_value'].iloc[-1]
+                        change = end_value - start_value
+                        change_pct = (change / start_value * 100) if start_value != 0 else 0
+                        
+                        st.metric("Zmiana wartości", f"{change:+.2f} PLN", f"{change_pct:+.2f}%")
+                        st.metric("Maksymalna wartość", f"{df_timeline['portfolio_value'].max():.2f} PLN")
+                        st.metric("Minimalna wartość", f"{df_timeline['portfolio_value'].min():.2f} PLN")
+            else:
+                st.info("Brak danych z ostatnich 3 dni do wygenerowania wykresu.")
         else:
-            st.info("Brak danych z ostatnich 3 dni do wygenerowania wykresu.")
-            if timeline_data:
-                st.write(f"Dostępne dane od: {min(entry['timestamp'] for entry in timeline_data)}")
-            st.write(f"Szukane dane od: {three_days_ago}")
+            st.info("Brak danych do wygenerowania wykresu.")
 
         if history:
             st.subheader("📊 Statystyki transakcji")
@@ -232,7 +212,6 @@ if portfolio_data:
                 st.metric("Łączne transakcje", total_transactions)
         else:
             st.info("Brak historii transakcji do wyświetlenia")
-
 else:
     st.warning("Brak danych z topicu 'portfolio'. Sprawdź czy:")
     st.write("1. Kafka jest uruchomiona")
