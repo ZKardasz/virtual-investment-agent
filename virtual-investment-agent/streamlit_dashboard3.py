@@ -16,77 +16,103 @@ KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
 def consume_portfolio_messages():
     """Pobiera wiadomości z Kafka tylko z wczoraj i dzisiaj"""
     try:
-        # Używamy unikalnej group_id za każdym razem, aby czytać od początku
-        group_id = f'portfolio_dashboard_group_{int(time.time())}'
-        
+        # Używamy None jako group_id aby emulować console consumer
         consumer = KafkaConsumer(
             KAFKA_TOPIC,
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
             auto_offset_reset='earliest',
             enable_auto_commit=False,
-            group_id=group_id,
+            group_id=None,  # Brak group_id - czytaj jak console consumer
             value_deserializer=lambda x: json.loads(x.decode('utf-8')),
-            consumer_timeout_ms=8000,     # Skrócony timeout
-            fetch_max_wait_ms=1500,
-            max_poll_records=500
+            consumer_timeout_ms=15000,    # Zwiększony timeout
+            fetch_max_wait_ms=3000,
+            max_poll_records=1000,
+            api_version=(0, 10, 1),       # Eksplicite ustawiona wersja API
+            session_timeout_ms=30000,
+            heartbeat_interval_ms=3000
         )
         
         messages = []
         start_time = time.time()
-        empty_polls = 0
-        max_empty_polls = 2  # Mniej pustych poll'ów
         
         # Definiuj dokładnie wczoraj i dzisiaj
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday = today - timedelta(days=1)
-        tomorrow = today + timedelta(days=1)  # Do filtrowania
+        tomorrow = today + timedelta(days=1)
         
-        st.info(f"🔍 Pobieranie danych tylko z {yesterday.strftime('%d.%m.%Y')} i {today.strftime('%d.%m.%Y')}...")
+        st.info(f"🔍 Łączenie z Kafka topic '{KAFKA_TOPIC}'...")
         
-        while True:
-            message_batch = consumer.poll(timeout_ms=2000)
+        # Sprawdź czy topic istnieje
+        try:
+            # Test połączenia
+            partitions = consumer.partitions_for_topic(KAFKA_TOPIC)
+            if partitions is None:
+                st.error(f"❌ Topic '{KAFKA_TOPIC}' nie istnieje!")
+                consumer.close()
+                return []
+            st.info(f"✅ Topic '{KAFKA_TOPIC}' znaleziony, partycje: {partitions}")
+        except Exception as e:
+            st.error(f"❌ Błąd sprawdzania topicu: {e}")
+            consumer.close()
+            return []
+        
+        st.info(f"🔍 Pobieranie danych z {yesterday.strftime('%d.%m.%Y')} i {today.strftime('%d.%m.%Y')}...")
+        
+        # Pobierz wszystkie wiadomości
+        message_count = 0
+        for message in consumer:
+            messages.append(message.value)
+            message_count += 1
             
-            if message_batch:
-                empty_polls = 0
-                for topic_partition, records in message_batch.items():
-                    for record in records:
-                        messages.append(record.value)
-                        
-                st.info(f"📥 Pobrano: {len(messages)} wiadomości...")
-            else:
-                empty_polls += 1
-                if empty_polls >= max_empty_polls:
-                    break
+            # Pokaż progress co 10 wiadomości
+            if message_count % 10 == 0:
+                st.info(f"📥 Pobrano: {message_count} wiadomości...")
             
-            # Krótszy timeout - 10 sekund
-            if time.time() - start_time > 10:
+            # Zabezpieczenie czasowe - 20 sekund maksymalnie
+            if time.time() - start_time > 20:
                 st.warning("⏰ Timeout - używam dostępne dane")
                 break
                 
         consumer.close()
         
+        st.success(f"📦 Pobrано łącznie {len(messages)} wiadomości z topicu")
+        
         # Filtruj TYLKO wczoraj i dzisiaj + usuń duplikaty
         filtered_messages = []
         seen_timestamps = set()
+        old_messages = 0
+        future_messages = 0
         
         for msg in messages:
             timestamp_str = msg.get('timestamp')
             if timestamp_str:
                 try:
                     msg_timestamp = parse_timestamp(timestamp_str)
-                    # Sprawdź czy wiadomość jest z wczoraj lub dzisiaj (ale nie z jutra)
-                    if (msg_timestamp >= yesterday and 
-                        msg_timestamp < tomorrow and 
-                        timestamp_str not in seen_timestamps):
+                    if msg_timestamp < yesterday:
+                        old_messages += 1
+                        continue
+                    elif msg_timestamp >= tomorrow:
+                        future_messages += 1
+                        continue
+                    elif timestamp_str not in seen_timestamps:
                         seen_timestamps.add(timestamp_str)
                         filtered_messages.append(msg)
-                except:
+                except Exception as parse_err:
+                    st.warning(f"⚠️ Błąd parsowania timestamp: {parse_err}")
                     continue
+            else:
+                # Wiadomości bez timestamp - dodaj jako potencjalnie aktualne
+                filtered_messages.append(msg)
         
         # Sortuj chronologicznie
         filtered_messages.sort(key=lambda x: parse_timestamp(x.get('timestamp', '')))
         
-        st.success(f"✅ Pobrano {len(filtered_messages)} wiadomości z {yesterday.strftime('%d.%m')} - {today.strftime('%d.%m')}")
+        if old_messages > 0:
+            st.info(f"🗑️ Odrzucono {old_messages} starych wiadomości")
+        if future_messages > 0:
+            st.info(f"⏰ Odrzucono {future_messages} wiadomości z przyszłości")
+        
+        st.success(f"✅ Przefiltrowano do {len(filtered_messages)} wiadomości z {yesterday.strftime('%d.%m')} - {today.strftime('%d.%m')}")
         return filtered_messages
         
     except Exception as e:
@@ -132,8 +158,68 @@ if st.button("🔄 Odśwież dane"):
     st.experimental_set_query_params(refresh=int(time.time()))
 
 # Pobierz dane z Kafka
-with st.spinner("Pobieranie danych z wczoraj i dzisiaj..."):
+with st.spinner("Łączenie z Kafka i pobieranie danych..."):
     portfolio_data = consume_portfolio_messages()
+
+# Debug info - pokaż status Kafka
+if not portfolio_data:
+    st.error("❌ Brak danych z Kafka!")
+    
+    # Dodaj sekcję diagnostyczną
+    st.subheader("🔧 Diagnostyka Kafka")
+    
+    # Test podstawowego połączenia
+    try:
+        from kafka import KafkaConsumer
+        test_consumer = KafkaConsumer(
+            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+            consumer_timeout_ms=3000
+        )
+        topics = test_consumer.topics()
+        test_consumer.close()
+        
+        st.success(f"✅ Połączenie z Kafka OK")
+        st.info(f"📋 Dostępne topiki: {list(topics)}")
+        
+        if KAFKA_TOPIC in topics:
+            st.success(f"✅ Topic '{KAFKA_TOPIC}' istnieje")
+        else:
+            st.error(f"❌ Topic '{KAFKA_TOPIC}' nie istnieje!")
+            st.info("💡 Utwórz topic poleceniem:")
+            st.code(f"kafka-topics.sh --create --topic {KAFKA_TOPIC} --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1")
+            
+    except Exception as e:
+        st.error(f"❌ Błąd połączenia z Kafka: {e}")
+        st.info("💡 Sprawdź czy Kafka działa:")
+        st.code("systemctl status kafka")
+        st.code("netstat -tlnp | grep 9092")
+    
+    st.warning("⚠️ Sprawdź czy:")
+    st.write("1. **Kafka jest uruchomiona** na localhost:9092")
+    st.write("2. **Topic 'portfolio' istnieje** i zawiera dane")
+    st.write("3. **Producer wysyła dane** do topiku")
+    st.write("4. **Firewall/sieć** nie blokuje połączenia")
+    
+    # Pokaż przykładowe dane testowe
+    st.subheader("🧪 Tryb demo (dane testowe)")
+    if st.button("📊 Pokaż demo z przykładowymi danymi"):
+        # Stwórz przykładowe dane
+        demo_data = []
+        base_time = datetime.now() - timedelta(hours=2)
+        
+        for i in range(20):
+            demo_data.append({
+                'timestamp': (base_time + timedelta(minutes=i*5)).isoformat(),
+                'cash': 10000 - i*50,
+                'stocks': {'AAPL': i % 3, 'GOOGL': i % 2},
+                'history': [
+                    {'timestamp': (base_time + timedelta(minutes=i*5)).isoformat(), 
+                     'action': 'BUY', 'stock': 'AAPL', 'price': 150 + i}
+                ]
+            })
+        
+        portfolio_data = demo_data
+        st.success("✅ Załadowano dane demo!")
 
 if portfolio_data:
     st.success(f"✅ Załadowano {len(portfolio_data)} snapshotów portfela")
